@@ -7,6 +7,6 @@
 
 package term
 
-import "syscall"
+import "golang.org/x/sys/unix"
 
-const ioctlGetTermios = syscall.TIOCGETA
+const ioctlGetTermios = unix.TIOCGETA
