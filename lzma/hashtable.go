@@ -261,7 +261,7 @@ func (t *hashTable) NextOp(rep [4]uint32) operation {
 	}
 
 	// check distances
-	var m match
+	var m operation
 	dictLen := t.dict.DictLen()
 	for _, dist := range dists {
 		if dist > dictLen {
@@ -294,7 +294,7 @@ func (t *hashTable) NextOp(rep [4]uint32) operation {
 			}
 		}
 		if n > m.n {
-			m = match{int64(dist), n}
+			m = matchOp(int64(dist), n)
 			if n == len(data) {
 				// No better match will be found.
 				break
@@ -303,7 +303,7 @@ func (t *hashTable) NextOp(rep [4]uint32) operation {
 	}
 
 	if m.n == 0 {
-		return lit{data[0]}
+		return litOp(data[0])
 	}
 	return m
 }

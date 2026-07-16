@@ -100,7 +100,7 @@ func (e *encoder) Reopen(bw io.ByteWriter) error {
 }
 
 // writeLiteral writes a literal into the LZMA stream
-func (e *encoder) writeLiteral(l lit) error {
+func (e *encoder) writeLiteral(l operation) error {
 	var err error
 	state, state2, _ := e.state.states(e.dict.Pos())
 	if err = e.state.isMatch[state2].Encode(e.re, 0); err != nil {
@@ -126,7 +126,7 @@ func iverson(ok bool) uint32 {
 }
 
 // writeMatch writes a repetition operation into the operation stream
-func (e *encoder) writeMatch(m match) error {
+func (e *encoder) writeMatch(m operation) error {
 	var err error
 	if !(minDistance <= m.distance && m.distance <= maxDistance) {
 		panic(fmt.Errorf("match distance %d out of range", m.distance))
@@ -209,14 +209,10 @@ func (e *encoder) writeOp(op operation) error {
 	if e.re.Available() < int64(e.margin) {
 		return ErrLimit
 	}
-	switch x := op.(type) {
-	case lit:
-		return e.writeLiteral(x)
-	case match:
-		return e.writeMatch(x)
-	default:
-		panic("unexpected operation")
+	if op.literal {
+		return e.writeLiteral(op)
 	}
+	return e.writeMatch(op)
 }
 
 // compress compressed data from the dictionary buffer. If the flag all
@@ -241,7 +237,7 @@ func (e *encoder) compress(flags compressFlags) error {
 }
 
 // eosMatch is a pseudo operation that indicates the end of the stream.
-var eosMatch = match{distance: maxDistance, n: minMatchLen}
+var eosMatch = matchOp(maxDistance, minMatchLen)
 
 // Close terminates the LZMA stream. If requested the end-of-stream
 // marker will be written. If the byte writer limit has been or will be

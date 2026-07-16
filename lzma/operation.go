@@ -10,46 +10,51 @@ import (
 )
 
 // operation represents an operation on the dictionary during encoding or
-// decoding.
-type operation interface {
-	Len() int
-}
-
-// rep represents a repetition at the given distance and the given length
-type match struct {
-	// supports all possible distance values, including the eos marker
+// decoding. It is a value type so that decoding and encoding the LZMA
+// stream do not allocate a boxed interface value per operation, which
+// dominated both the compression and decompression hot paths.
+//
+// An operation is either a single-byte literal (literal == true) or a
+// match at the given distance and length.
+type operation struct {
+	// literal reports whether the operation is a single-byte literal.
+	// When false, the operation is a match.
+	literal bool
+	// b holds the literal byte, valid when literal is true.
+	b byte
+	// distance supports all possible distance values, including the eos
+	// marker; valid when literal is false.
 	distance int64
-	// length
+	// n is the number of bytes represented by the operation. It is 1 for
+	// a literal and the match length otherwise.
 	n int
 }
 
-// Len returns the number of bytes matched.
-func (m match) Len() int {
-	return m.n
+// litOp returns a literal operation for the given byte.
+func litOp(b byte) operation {
+	return operation{literal: true, b: b, n: 1}
 }
 
-// String returns a string representation for the repetition.
-func (m match) String() string {
-	return fmt.Sprintf("M{%d,%d}", m.distance, m.n)
+// matchOp returns a match operation for the given distance and length.
+func matchOp(distance int64, n int) operation {
+	return operation{distance: distance, n: n}
 }
 
-// lit represents a single byte literal.
-type lit struct {
-	b byte
+// Len returns the number of bytes represented by the operation.
+func (o operation) Len() int {
+	return o.n
 }
 
-// Len returns 1 for the single byte literal.
-func (l lit) Len() int {
-	return 1
-}
-
-// String returns a string representation for the literal.
-func (l lit) String() string {
-	var c byte
-	if unicode.IsPrint(rune(l.b)) {
-		c = l.b
-	} else {
-		c = '.'
+// String returns a string representation for the operation.
+func (o operation) String() string {
+	if o.literal {
+		var c byte
+		if unicode.IsPrint(rune(o.b)) {
+			c = o.b
+		} else {
+			c = '.'
+		}
+		return fmt.Sprintf("L{%c/%02x}", c, o.b)
 	}
-	return fmt.Sprintf("L{%c/%02x}", c, l.b)
+	return fmt.Sprintf("M{%d,%d}", o.distance, o.n)
 }
