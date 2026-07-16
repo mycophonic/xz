@@ -9,7 +9,7 @@ import (
 	"io/ioutil"
 	"testing"
 
-	"github.com/ulikunitz/xz"
+	"github.com/mycophonic/xz"
 )
 
 func TestPanic(t *testing.T) {

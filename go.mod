@@ -1,4 +1,4 @@
-module github.com/ulikunitz/xz
+module github.com/mycophonic/xz
 
 go 1.20
 
