@@ -5,6 +5,7 @@
 package lzma
 
 import (
+	"bytes"
 	"errors"
 	"io"
 
@@ -46,6 +47,12 @@ type Reader2 struct {
 	ur          *uncompressedReader
 	decoder     *decoder
 	chunkReader io.Reader
+
+	// reusable buffer and reader that hold one compressed chunk in memory
+	// so the range decoder reads bytes by index instead of paying a
+	// per-byte interface Read plus memmove through a streaming breader.
+	compBuf []byte
+	compRd  bytes.Reader
 
 	cstate chunkState
 }
@@ -107,7 +114,25 @@ func (r *Reader2) startChunk() error {
 		r.chunkReader = r.ur
 		return nil
 	}
-	br := ByteReader(io.LimitReader(r.r, int64(header.compressed)+1))
+	// Buffer the whole compressed chunk. The stored size field is the
+	// actual length minus one, so the chunk is header.compressed+1 bytes
+	// (matching the previous LimitReader bound). io.ReadFull advances r.r
+	// by exactly that many bytes, keeping the next chunk header aligned,
+	// and serving the range decoder from an in-memory bytes.Reader avoids
+	// the per-byte Read plus memmove that the streaming breader incurred.
+	n := int(header.compressed) + 1
+	if cap(r.compBuf) < n {
+		r.compBuf = make([]byte, n)
+	}
+	r.compBuf = r.compBuf[:n]
+	if _, err = io.ReadFull(r.r, r.compBuf); err != nil {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		return err
+	}
+	r.compRd.Reset(r.compBuf)
+	br := &r.compRd
 	if r.decoder == nil {
 		state := newState(header.props)
 		r.decoder, err = newDecoder(br, state, r.dict, size)
