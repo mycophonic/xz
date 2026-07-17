@@ -81,6 +81,10 @@ func (c *literalCodec) Decode(d *rangeDecoder,
 ) (s byte, err error) {
 	k := litState * 0x300
 	probs := c.probs[k : k+0x300]
+	// Hoist range/code into locals and inline the bit decode via
+	// decodeBitArith so the decoder state stays in registers across the
+	// whole (up to 8-bit) literal, committed to the struct once.
+	rng, code := d.nrange, d.code
 	symbol := uint32(1)
 	if state >= 7 {
 		m := uint32(match)
@@ -88,9 +92,13 @@ func (c *literalCodec) Decode(d *rangeDecoder,
 			matchBit := (m >> 7) & 1
 			m <<= 1
 			i := ((1 + matchBit) << 8) | symbol
-			bit, err := d.DecodeBit(&probs[i])
-			if err != nil {
-				return 0, err
+			var bit uint32
+			bit, rng, code = decodeBitArith(&probs[i], rng, code)
+			if rng < rcTop {
+				if rng, code, err = d.readNorm(rng, code); err != nil {
+					d.nrange, d.code = rng, code
+					return 0, err
+				}
 			}
 			symbol = (symbol << 1) | bit
 			if matchBit != bit {
@@ -102,12 +110,17 @@ func (c *literalCodec) Decode(d *rangeDecoder,
 		}
 	}
 	for symbol < 0x100 {
-		bit, err := d.DecodeBit(&probs[symbol])
-		if err != nil {
-			return 0, err
+		var bit uint32
+		bit, rng, code = decodeBitArith(&probs[symbol], rng, code)
+		if rng < rcTop {
+			if rng, code, err = d.readNorm(rng, code); err != nil {
+				d.nrange, d.code = rng, code
+				return 0, err
+			}
 		}
 		symbol = (symbol << 1) | bit
 	}
+	d.nrange, d.code = rng, code
 	s = byte(symbol - 0x100)
 	return s, nil
 }

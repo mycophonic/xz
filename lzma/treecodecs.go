@@ -36,15 +36,26 @@ func (tc *treeCodec) Encode(e *rangeEncoder, v uint32) (err error) {
 
 // Decodes uses the range decoder to decode a fixed-bit-size value. Errors may
 // be caused by the range decoder.
+//
+// range/code are hoisted into locals for the whole symbol and the bit decode
+// is inlined via decodeBitArith, so the decoder state stays in registers and
+// is committed to the struct once instead of on every bit.
 func (tc *treeCodec) Decode(d *rangeDecoder) (v uint32, err error) {
+	rng, code := d.nrange, d.code
+	probs := tc.probs
 	m := uint32(1)
 	for j := 0; j < int(tc.bits); j++ {
-		b, err := d.DecodeBit(&tc.probs[m])
-		if err != nil {
-			return 0, err
-		}
+		var b uint32
+		b, rng, code = decodeBitArith(&probs[m], rng, code)
 		m = (m << 1) | b
+		if rng < rcTop {
+			if rng, code, err = d.readNorm(rng, code); err != nil {
+				d.nrange, d.code = rng, code
+				return 0, err
+			}
+		}
 	}
+	d.nrange, d.code = rng, code
 	return m - (1 << uint(tc.bits)), nil
 }
 
@@ -83,15 +94,22 @@ func (tc *treeReverseCodec) Encode(v uint32, e *rangeEncoder) (err error) {
 // Decodes uses the range decoder to decode a fixed-bit-size value. Errors
 // returned by the range decoder will be returned.
 func (tc *treeReverseCodec) Decode(d *rangeDecoder) (v uint32, err error) {
+	rng, code := d.nrange, d.code
+	probs := tc.probs
 	m := uint32(1)
 	for j := uint(0); j < uint(tc.bits); j++ {
-		b, err := d.DecodeBit(&tc.probs[m])
-		if err != nil {
-			return 0, err
-		}
+		var b uint32
+		b, rng, code = decodeBitArith(&probs[m], rng, code)
 		m = (m << 1) | b
 		v |= b << j
+		if rng < rcTop {
+			if rng, code, err = d.readNorm(rng, code); err != nil {
+				d.nrange, d.code = rng, code
+				return 0, err
+			}
+		}
 	}
+	d.nrange, d.code = rng, code
 	return v, nil
 }
 

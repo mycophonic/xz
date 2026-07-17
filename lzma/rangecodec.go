@@ -162,40 +162,72 @@ func (d *rangeDecoder) possiblyAtEnd() bool {
 	return d.code == 0
 }
 
+// rcTop is the range-decoder normalization threshold. When nrange drops
+// below it another input byte is shifted into code.
+const rcTop = 1 << 24
+
+// decodeBitArith performs the arithmetic half of decoding a single range-coded
+// bit: it selects the bit as code >= bound, updates the probability model, and
+// returns the decoded bit together with the new range and code. It does NOT
+// normalize — the caller renormalizes (see readNorm) whenever nrng < rcTop.
+//
+// The decoded bit is code >= bound. That comparison is data-dependent and
+// essentially unpredictable (near-random compressed bits), so branching on it
+// mispredicts ~half the time; instead a full-width mask selects the range,
+// code and probability updates with arithmetic (the bare comparison compiles
+// to a conditional set, no branch).
+//
+// Range/code are passed and returned by value rather than read from and
+// written to *rangeDecoder. This keeps the function small enough to inline
+// into the multi-bit codec decode loops, which then hold range/code in
+// registers across a whole symbol and commit them to the struct once, instead
+// of storing and reloading them on every bit. The only memory side effect is
+// the required *p update.
+func decodeBitArith(p *prob, rng, code uint32) (bit, nrng, ncode uint32) {
+	pv := uint32(*p)
+	bound := (rng >> probbits) * pv
+	// mask is 0xffffffff when the bit is 1 (code >= bound), else 0.
+	var mask uint32
+	if code >= bound {
+		bit = 1
+		mask = ^mask
+	}
+	// bit 1: code -= bound, nrange -= bound, p -= p>>movebits
+	// bit 0: code stays,    nrange  = bound, p += (max-p)>>movebits
+	ncode = code - bound&mask
+	nrng = (rng-bound)&mask | bound&^mask
+	*p = prob(pv + ((((1<<probbits)-pv)>>movebits)&^mask) - ((pv>>movebits)&mask))
+	return bit, nrng, ncode
+}
+
+// readNorm performs one renormalization step on the passed range/code: it
+// shifts in one input byte. It is only reached ~once per eight bits, so the
+// out-of-line call (it reads through the io.ByteReader and may error) is
+// amortized; keeping it out of decodeBitArith is what lets that function
+// inline.
+func (d *rangeDecoder) readNorm(rng, code uint32) (nrng, ncode uint32, err error) {
+	rng <<= 8
+	c, err := d.br.ReadByte()
+	if err != nil {
+		return rng, code, err
+	}
+	return rng, (code << 8) | uint32(c), nil
+}
+
 // decodeBit decodes a single bit. The bit will be returned at the
 // least-significant position. All other bits will be zero. The probability
 // value will be updated.
 func (d *rangeDecoder) DecodeBit(p *prob) (b uint32, err error) {
-	bound := (d.nrange >> probbits) * uint32(*p)
-	// The decoded bit is code >= bound. That comparison is data-dependent
-	// and essentially unpredictable (it is decoding near-random compressed
-	// bits), so branching on it mispredicts ~half the time and dominated the
-	// decode. Instead derive a full-width mask from it and select the range,
-	// code and probability updates with arithmetic. The bare comparison-to-a
-	// -flag compiles to a conditional set (no branch); only the predictable
-	// normalization below remains a branch.
-	var ge uint32
-	if d.code >= bound {
-		ge = 1
+	rng, code := d.nrange, d.code
+	b, rng, code = decodeBitArith(p, rng, code)
+	if rng < rcTop {
+		if rng, code, err = d.readNorm(rng, code); err != nil {
+			d.nrange, d.code = rng, code
+			return b, err
+		}
 	}
-	mask := uint32(0) - ge // 0xffffffff when the bit is 1, else 0
-	// bit 1: code -= bound, nrange -= bound, p -= p>>movebits
-	// bit 0: code stays,    nrange  = bound, p += (max-p)>>movebits
-	d.code -= bound & mask
-	d.nrange = (d.nrange-bound)&mask | bound&^mask
-	pv := uint32(*p)
-	inc := ((1 << probbits) - pv) >> movebits
-	dec := pv >> movebits
-	*p = prob(pv + (inc &^ mask) - (dec & mask))
-	b = ge
-
-	// normalize (predictable: taken roughly once per eight bits)
-	const top = 1 << 24
-	if d.nrange >= top {
-		return b, nil
-	}
-	d.nrange <<= 8
-	return b, d.updateCode()
+	d.nrange, d.code = rng, code
+	return b, nil
 }
 
 // updateCode reads a new byte into the code.
