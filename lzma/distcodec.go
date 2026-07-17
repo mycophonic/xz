@@ -98,18 +98,19 @@ func (dc *distCodec) Encode(e *rangeEncoder, dist uint32, l uint32) (err error) 
 	return dc.alignCodec.Encode(dist, e)
 }
 
-// Decode decodes the distance offset using the parameter l. The dist value
+// decode decodes the distance offset using the parameter l. The dist value
 // 0xffffffff (eos) indicates the end of the stream. Add one to the distance
-// offset to get the actual match distance.
-func (dc *distCodec) Decode(d *rangeDecoder, l uint32) (dist uint32, err error) {
-	posSlot, err := dc.posSlotCodecs[lenState(l)].Decode(d)
-	if err != nil {
-		return
-	}
+// offset to get the actual match distance. The decoder state range/code is
+// threaded through in registers (see readOp); read errors are sticky on the
+// decoder and checked once per operation.
+func (dc *distCodec) decode(d *rangeDecoder, l, rng, code uint32,
+) (dist, nrng, ncode uint32) {
+	var posSlot uint32
+	posSlot, rng, code = dc.posSlotCodecs[lenState(l)].decode(d, rng, code)
 
 	// posSlot equals distance
 	if posSlot < startPosModel {
-		return posSlot, nil
+		return posSlot, rng, code
 	}
 
 	// posSlot uses the individual models
@@ -118,23 +119,17 @@ func (dc *distCodec) Decode(d *rangeDecoder, l uint32) (dist uint32, err error) 
 	var u uint32
 	if posSlot < endPosModel {
 		tc := &dc.posModel[posSlot-startPosModel]
-		if u, err = tc.Decode(d); err != nil {
-			return 0, err
-		}
+		u, rng, code = tc.decode(d, rng, code)
 		dist += u
-		return dist, nil
+		return dist, rng, code
 	}
 
 	// posSlots use direct encoding and a single model for the four align
 	// bits.
 	dic := directCodec(bits - alignBits)
-	if u, err = dic.Decode(d); err != nil {
-		return 0, err
-	}
+	u, rng, code = dic.decode(d, rng, code)
 	dist += u << alignBits
-	if u, err = dc.alignCodec.Decode(d); err != nil {
-		return 0, err
-	}
+	u, rng, code = dc.alignCodec.decode(d, rng, code)
 	dist += u
-	return dist, nil
+	return dist, rng, code
 }

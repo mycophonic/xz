@@ -34,14 +34,14 @@ func (tc *treeCodec) Encode(e *rangeEncoder, v uint32) (err error) {
 	return nil
 }
 
-// Decodes uses the range decoder to decode a fixed-bit-size value. Errors may
-// be caused by the range decoder.
+// decode uses the range decoder to decode a fixed-bit-size value. The decoder
+// state range/code is threaded through in registers (see readOp); read errors
+// are sticky on the decoder and checked once per operation.
 //
-// range/code are hoisted into locals for the whole symbol and the bit decode
-// is inlined via decodeBitArith, so the decoder state stays in registers and
-// is committed to the struct once instead of on every bit.
-func (tc *treeCodec) Decode(d *rangeDecoder) (v uint32, err error) {
-	rng, code := d.nrange, d.code
+// The bit decode (decodeBitArith) inlines and the renormalization byte read
+// is hand-inlined (readByteSlow only on the cold branch), so the common loop
+// body is free of calls and error branches.
+func (tc *treeCodec) decode(d *rangeDecoder, rng, code uint32) (v, nrng, ncode uint32) {
 	probs := tc.probs
 	m := uint32(1)
 	for j := 0; j < int(tc.bits); j++ {
@@ -49,14 +49,17 @@ func (tc *treeCodec) Decode(d *rangeDecoder) (v uint32, err error) {
 		b, rng, code = decodeBitArith(&probs[m], rng, code)
 		m = (m << 1) | b
 		if rng < rcTop {
-			if rng, code, err = d.readNorm(rng, code); err != nil {
-				d.nrange, d.code = rng, code
-				return 0, err
+			rng <<= 8
+			code <<= 8
+			if pos := d.pos; pos < len(d.buf) {
+				code |= uint32(d.buf[pos])
+				d.pos = pos + 1
+			} else {
+				code |= uint32(d.readByteSlow())
 			}
 		}
 	}
-	d.nrange, d.code = rng, code
-	return m - (1 << uint(tc.bits)), nil
+	return m - (1 << uint(tc.bits)), rng, code
 }
 
 // treeReverseCodec is another tree codec, where the least-significant bit is
@@ -91,10 +94,10 @@ func (tc *treeReverseCodec) Encode(v uint32, e *rangeEncoder) (err error) {
 	return nil
 }
 
-// Decodes uses the range decoder to decode a fixed-bit-size value. Errors
-// returned by the range decoder will be returned.
-func (tc *treeReverseCodec) Decode(d *rangeDecoder) (v uint32, err error) {
-	rng, code := d.nrange, d.code
+// decode uses the range decoder to decode a fixed-bit-size value. It is
+// structured like treeCodec.decode: threaded range/code, inlined bit decode,
+// hand-inlined renormalization, sticky read errors.
+func (tc *treeReverseCodec) decode(d *rangeDecoder, rng, code uint32) (v, nrng, ncode uint32) {
 	probs := tc.probs
 	m := uint32(1)
 	for j := uint(0); j < uint(tc.bits); j++ {
@@ -103,14 +106,17 @@ func (tc *treeReverseCodec) Decode(d *rangeDecoder) (v uint32, err error) {
 		m = (m << 1) | b
 		v |= b << j
 		if rng < rcTop {
-			if rng, code, err = d.readNorm(rng, code); err != nil {
-				d.nrange, d.code = rng, code
-				return 0, err
+			rng <<= 8
+			code <<= 8
+			if pos := d.pos; pos < len(d.buf) {
+				code |= uint32(d.buf[pos])
+				d.pos = pos + 1
+			} else {
+				code |= uint32(d.readByteSlow())
 			}
 		}
 	}
-	d.nrange, d.code = rng, code
-	return v, nil
+	return v, rng, code
 }
 
 // probTree stores enough probability values to be used by the treeEncode and

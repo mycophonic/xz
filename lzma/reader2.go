@@ -5,7 +5,6 @@
 package lzma
 
 import (
-	"bytes"
 	"errors"
 	"io"
 
@@ -51,8 +50,10 @@ type Reader2 struct {
 	// reusable buffer and reader that hold one compressed chunk in memory
 	// so the range decoder reads bytes by index instead of paying a
 	// per-byte interface Read plus memmove through a streaming breader.
+	// newRangeDecoder recognizes the byteSliceReader and adopts the slice
+	// directly for its call-free read path.
 	compBuf []byte
-	compRd  bytes.Reader
+	compRd  byteSliceReader
 
 	cstate chunkState
 }
@@ -131,7 +132,7 @@ func (r *Reader2) startChunk() error {
 		}
 		return err
 	}
-	r.compRd.Reset(r.compBuf)
+	r.compRd = byteSliceReader{buf: r.compBuf}
 	br := &r.compRd
 	if r.decoder == nil {
 		state := newState(header.props)

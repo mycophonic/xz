@@ -24,31 +24,32 @@ func (dc directCodec) Encode(e *rangeEncoder, v uint32) error {
 	return nil
 }
 
-// Decode uses the range decoder to decode a value with the given number of
-// given bits. The most-significant bit is decoded first.
-func (dc directCodec) Decode(d *rangeDecoder) (v uint32, err error) {
+// decode uses the range decoder to decode a value with the given number of
+// given bits. The most-significant bit is decoded first. The decoder state
+// range/code is threaded through in registers (see readOp).
+func (dc directCodec) decode(d *rangeDecoder, rng, code uint32) (v, nrng, ncode uint32) {
 	// Direct bits are equiprobable, so there is no probability model to
-	// touch — the per-bit cost is purely call overhead and reloading
-	// range/code from the struct. Hoist range/code into locals and inline
-	// DirectDecodeBit (and its byte read) into the loop; write back once.
-	const top = 1 << 24
-	rng, code := d.nrange, d.code
+	// touch — the per-bit cost is purely the range arithmetic. The
+	// renormalization byte read is hand-inlined (readByteSlow only on the
+	// cold branch), so the common loop body is free of calls and error
+	// branches; read errors are sticky on the decoder and checked once per
+	// operation.
 	for i := int(dc); i > 0; i-- {
 		rng >>= 1
 		code -= rng
 		t := 0 - (code >> 31)
 		code += rng & t
 		v = (v << 1) | ((t + 1) & 1)
-		if rng < top {
+		if rng < rcTop {
 			rng <<= 8
-			var b byte
-			if b, err = d.br.ReadByte(); err != nil {
-				d.nrange, d.code = rng, code
-				return 0, err
+			code <<= 8
+			if pos := d.pos; pos < len(d.buf) {
+				code |= uint32(d.buf[pos])
+				d.pos = pos + 1
+			} else {
+				code |= uint32(d.readByteSlow())
 			}
-			code = (code << 8) | uint32(b)
 		}
 	}
-	d.nrange, d.code = rng, code
-	return v, nil
+	return v, rng, code
 }

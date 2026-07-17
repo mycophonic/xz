@@ -125,29 +125,64 @@ func (e *rangeEncoder) shiftLow() error {
 }
 
 // rangeDecoder decodes single bits of the range encoding stream.
+//
+// The decoder reads its input either from an in-memory byte slice (buf/pos,
+// the fast path used for LZMA2 chunks, which are fully buffered) or from a
+// streaming io.ByteReader (br, used for LZMA1 streams of unknown size). Read
+// failures — including running off the end of buf — are not reported per
+// byte; instead err is set once (sticky) and further reads return zero bytes.
+// The decode loops therefore contain no error branches; callers check err
+// once per decoded operation. Decoding garbage zero bytes until that check is
+// harmless: every symbol decode terminates after a bounded number of bits.
 type rangeDecoder struct {
+	buf    []byte
+	pos    int
 	br     io.ByteReader
+	err    error
 	nrange uint32
 	code   uint32
+}
+
+// byteSliceReader is an io.ByteReader over a byte slice. newRangeDecoder
+// recognizes it and adopts the slice directly, enabling the call-free
+// in-memory read path.
+type byteSliceReader struct {
+	buf []byte
+	pos int
+}
+
+// ReadByte reads a single byte from the slice.
+func (b *byteSliceReader) ReadByte() (c byte, err error) {
+	if b.pos >= len(b.buf) {
+		return 0, io.EOF
+	}
+	c = b.buf[b.pos]
+	b.pos++
+	return c, nil
 }
 
 // newRangeDecoder initializes a range decoder. It reads five bytes from the
 // reader and therefore may return an error.
 func newRangeDecoder(br io.ByteReader) (d *rangeDecoder, err error) {
-	d = &rangeDecoder{br: br, nrange: 0xffffffff}
+	if bsr, ok := br.(*byteSliceReader); ok {
+		d = &rangeDecoder{buf: bsr.buf, pos: bsr.pos, nrange: 0xffffffff}
+	} else {
+		d = &rangeDecoder{br: br, nrange: 0xffffffff}
+	}
 
-	b, err := d.br.ReadByte()
-	if err != nil {
-		return nil, err
+	b := d.readByte()
+	if d.err != nil {
+		return nil, d.err
 	}
 	if b != 0 {
 		return nil, errors.New("newRangeDecoder: first byte not zero")
 	}
 
 	for i := 0; i < 4; i++ {
-		if err = d.updateCode(); err != nil {
-			return nil, err
-		}
+		d.code = (d.code << 8) | uint32(d.readByte())
+	}
+	if d.err != nil {
+		return nil, d.err
 	}
 
 	if d.code >= d.nrange {
@@ -169,7 +204,7 @@ const rcTop = 1 << 24
 // decodeBitArith performs the arithmetic half of decoding a single range-coded
 // bit: it selects the bit as code >= bound, updates the probability model, and
 // returns the decoded bit together with the new range and code. It does NOT
-// normalize — the caller renormalizes (see readNorm) whenever nrng < rcTop.
+// normalize — the caller shifts in a byte (readByte) whenever nrng < rcTop.
 //
 // The decoded bit is code >= bound. That comparison is data-dependent and
 // essentially unpredictable (near-random compressed bits), so branching on it
@@ -196,46 +231,67 @@ func decodeBitArith(p *prob, rng, code uint32) (bit, nrng, ncode uint32) {
 	// bit 0: code stays,    nrange  = bound, p += (max-p)>>movebits
 	ncode = code - bound&mask
 	nrng = (rng-bound)&mask | bound&^mask
-	*p = prob(pv + ((((1<<probbits)-pv)>>movebits)&^mask) - ((pv>>movebits)&mask))
+	*p = prob(pv + ((((1 << probbits) - pv) >> movebits) &^ mask) - ((pv >> movebits) & mask))
 	return bit, nrng, ncode
 }
 
-// readNorm performs one renormalization step on the passed range/code: it
-// shifts in one input byte. It is only reached ~once per eight bits, so the
-// out-of-line call (it reads through the io.ByteReader and may error) is
-// amortized; keeping it out of decodeBitArith is what lets that function
-// inline.
-func (d *rangeDecoder) readNorm(rng, code uint32) (nrng, ncode uint32, err error) {
-	rng <<= 8
+// readByte returns the next input byte. On exhaustion (or a read error on the
+// streaming fallback) it records a sticky error on the decoder and returns
+// zero bytes; see the rangeDecoder documentation.
+//
+// The decode loops do not call readByte: its cost model price (the cold
+// readByteSlow call alone counts 57 of the 80 budget) keeps it from inlining,
+// so the loops hand-inline the in-memory fast path and call readByteSlow
+// directly on the cold branch. It is kept for the non-hot readers
+// (initialization).
+func (d *rangeDecoder) readByte() byte {
+	pos := d.pos
+	if pos >= len(d.buf) {
+		return d.readByteSlow()
+	}
+	d.pos = pos + 1
+	return d.buf[pos]
+}
+
+// readByteSlow serves the byte reads once the in-memory buffer is exhausted:
+// it reads from the streaming fallback if present and records the sticky
+// error otherwise. Kept out of the hot decode loops, which only call it on
+// the cold branch of their hand-inlined fast path.
+func (d *rangeDecoder) readByteSlow() byte {
+	if d.err != nil {
+		return 0
+	}
+	if d.br == nil {
+		d.err = io.EOF
+		return 0
+	}
 	c, err := d.br.ReadByte()
 	if err != nil {
-		return rng, code, err
+		d.err = err
+		return 0
 	}
-	return rng, (code << 8) | uint32(c), nil
+	return c
 }
 
-// decodeBit decodes a single bit. The bit will be returned at the
-// least-significant position. All other bits will be zero. The probability
-// value will be updated.
-func (d *rangeDecoder) DecodeBit(p *prob) (b uint32, err error) {
-	rng, code := d.nrange, d.code
+// decodeBit decodes a single bit with threaded decoder state: range/code are
+// passed in and returned in registers instead of being reloaded from and
+// committed to the struct around every bit, so the call itself carries no
+// memory traffic. The multi-bit decode loops hand-inline the same sequence;
+// this function serves the isolated per-operation bits (readOp, the
+// lengthCodec choice bits). The bit will be returned at the least-significant
+// position; all other bits will be zero. The probability value will be
+// updated.
+func (d *rangeDecoder) decodeBit(p *prob, rng, code uint32) (b, nrng, ncode uint32) {
 	b, rng, code = decodeBitArith(p, rng, code)
 	if rng < rcTop {
-		if rng, code, err = d.readNorm(rng, code); err != nil {
-			d.nrange, d.code = rng, code
-			return b, err
+		rng <<= 8
+		code <<= 8
+		if pos := d.pos; pos < len(d.buf) {
+			code |= uint32(d.buf[pos])
+			d.pos = pos + 1
+		} else {
+			code |= uint32(d.readByteSlow())
 		}
 	}
-	d.nrange, d.code = rng, code
-	return b, nil
-}
-
-// updateCode reads a new byte into the code.
-func (d *rangeDecoder) updateCode() error {
-	b, err := d.br.ReadByte()
-	if err != nil {
-		return err
-	}
-	d.code = (d.code << 8) | uint32(b)
-	return nil
+	return b, rng, code
 }

@@ -62,15 +62,13 @@ func (d *decoder) Reopen(br io.ByteReader, size int64) error {
 	return nil
 }
 
-// decodeLiteral decodes a single literal from the LZMA stream.
-func (d *decoder) decodeLiteral() (op operation, err error) {
+// decodeLiteral decodes a single literal from the LZMA stream. The decoder
+// state range/code is threaded through in registers (see readOp).
+func (d *decoder) decodeLiteral(rng, code uint32) (op operation, nrng, ncode uint32) {
 	litState := d.State.litState(d.Dict.byteAt(1), d.Dict.head)
 	match := d.Dict.byteAt(int(d.State.rep[0]) + 1)
-	s, err := d.State.litCodec.Decode(d.rd, d.State.state, match, litState)
-	if err != nil {
-		return operation{}, err
-	}
-	return litOp(s), nil
+	s, rng, code := d.State.litCodec.decode(d.rd, d.State.state, match, litState, rng, code)
+	return litOp(s), rng, code
 }
 
 // errEOS indicates that an EOS marker has been found.
@@ -79,29 +77,31 @@ var errEOS = errors.New("EOS marker found")
 // readOp decodes the next operation from the compressed stream. It
 // returns the operation. If an explicit end of stream marker is
 // identified the eos error is returned.
+//
+// The range decoder state range/code is hoisted into locals here and threaded
+// through every codec in registers, so it is loaded from and committed to the
+// rangeDecoder struct once per operation instead of at every codec boundary.
+// The codecs report no per-call errors; input failures are sticky on the
+// rangeDecoder (rd.err) and are checked by the caller (decompress) after each
+// operation.
 func (d *decoder) readOp() (op operation, err error) {
 	// Value of the end of stream (EOS) marker
 	const eosDist = 1<<32 - 1
 
 	state, state2, posState := d.State.states(d.Dict.head)
 
-	b, err := d.State.isMatch[state2].Decode(d.rd)
-	if err != nil {
-		return operation{}, err
-	}
+	rd := d.rd
+	rng, code := rd.nrange, rd.code
+	var b uint32
+	b, rng, code = rd.decodeBit(&d.State.isMatch[state2], rng, code)
 	if b == 0 {
 		// literal
-		op, err := d.decodeLiteral()
-		if err != nil {
-			return operation{}, err
-		}
+		op, rng, code = d.decodeLiteral(rng, code)
+		rd.nrange, rd.code = rng, code
 		d.State.updateStateLiteral()
 		return op, nil
 	}
-	b, err = d.State.isRep[state].Decode(d.rd)
-	if err != nil {
-		return operation{}, err
-	}
+	b, rng, code = rd.decodeBit(&d.State.isRep[state], rng, code)
 	if b == 0 {
 		// simple match
 		d.State.rep[3], d.State.rep[2], d.State.rep[1] =
@@ -109,16 +109,12 @@ func (d *decoder) readOp() (op operation, err error) {
 
 		d.State.updateStateMatch()
 		// The length decoder returns the length offset.
-		n, err := d.State.lenCodec.Decode(d.rd, posState)
-		if err != nil {
-			return operation{}, err
-		}
+		var n uint32
+		n, rng, code = d.State.lenCodec.decode(rd, posState, rng, code)
 		// The dist decoder returns the distance offset. The actual
 		// distance is 1 higher.
-		d.State.rep[0], err = d.State.distCodec.Decode(d.rd, n)
-		if err != nil {
-			return operation{}, err
-		}
+		d.State.rep[0], rng, code = d.State.distCodec.decode(rd, n, rng, code)
+		rd.nrange, rd.code = rng, code
 		if d.State.rep[0] == eosDist {
 			d.eosMarker = true
 			return operation{}, errEOS
@@ -126,34 +122,23 @@ func (d *decoder) readOp() (op operation, err error) {
 		op = matchOp(int64(d.State.rep[0])+minDistance, int(n)+minMatchLen)
 		return op, nil
 	}
-	b, err = d.State.isRepG0[state].Decode(d.rd)
-	if err != nil {
-		return operation{}, err
-	}
+	b, rng, code = rd.decodeBit(&d.State.isRepG0[state], rng, code)
 	dist := d.State.rep[0]
 	if b == 0 {
 		// rep match 0
-		b, err = d.State.isRepG0Long[state2].Decode(d.rd)
-		if err != nil {
-			return operation{}, err
-		}
+		b, rng, code = rd.decodeBit(&d.State.isRepG0Long[state2], rng, code)
 		if b == 0 {
+			rd.nrange, rd.code = rng, code
 			d.State.updateStateShortRep()
 			op = matchOp(int64(dist)+minDistance, 1)
 			return op, nil
 		}
 	} else {
-		b, err = d.State.isRepG1[state].Decode(d.rd)
-		if err != nil {
-			return operation{}, err
-		}
+		b, rng, code = rd.decodeBit(&d.State.isRepG1[state], rng, code)
 		if b == 0 {
 			dist = d.State.rep[1]
 		} else {
-			b, err = d.State.isRepG2[state].Decode(d.rd)
-			if err != nil {
-				return operation{}, err
-			}
+			b, rng, code = rd.decodeBit(&d.State.isRepG2[state], rng, code)
 			if b == 0 {
 				dist = d.State.rep[2]
 			} else {
@@ -165,10 +150,9 @@ func (d *decoder) readOp() (op operation, err error) {
 		d.State.rep[1] = d.State.rep[0]
 		d.State.rep[0] = dist
 	}
-	n, err := d.State.repLenCodec.Decode(d.rd, posState)
-	if err != nil {
-		return operation{}, err
-	}
+	var n uint32
+	n, rng, code = d.State.repLenCodec.decode(rd, posState, rng, code)
+	rd.nrange, rd.code = rng, code
 	d.State.updateStateRep()
 	op = matchOp(int64(dist)+minDistance, int(n)+minMatchLen)
 	return op, nil
@@ -191,6 +175,14 @@ func (d *decoder) decompress() error {
 	}
 	for d.Dict.Available() >= maxMatchLen {
 		op, err := d.readOp()
+		// The range decoder records input failures as a sticky error
+		// instead of reporting them per byte (the decode loops are free
+		// of error branches). An op decoded from missing input is
+		// garbage, so the read error takes precedence over whatever
+		// readOp returned.
+		if d.rd.err != nil {
+			err = d.rd.err
+		}
 		switch err {
 		case nil:
 			// break
@@ -218,7 +210,11 @@ func (d *decoder) decompress() error {
 				return errSize
 			}
 			if !d.rd.possiblyAtEnd() {
-				switch _, err = d.readOp(); err {
+				_, err = d.readOp()
+				if d.rd.err != nil {
+					err = d.rd.err
+				}
+				switch err {
 				case nil:
 					return errSize
 				case io.EOF:

@@ -89,27 +89,22 @@ func (lc *lengthCodec) Encode(e *rangeEncoder, l uint32, posState uint32,
 	return nil
 }
 
-// Decode reads the length offset. Add minMatchLen to compute the actual length
-// to the length offset l.
-func (lc *lengthCodec) Decode(d *rangeDecoder, posState uint32,
-) (l uint32, err error) {
+// decode reads the length offset. Add minMatchLen to compute the actual
+// length to the length offset l. The decoder state range/code is threaded
+// through in registers (see readOp); read errors are sticky on the decoder
+// and checked once per operation.
+func (lc *lengthCodec) decode(d *rangeDecoder, posState, rng, code uint32,
+) (l, nrng, ncode uint32) {
 	var b uint32
-	if b, err = lc.choice[0].Decode(d); err != nil {
-		return
-	}
+	b, rng, code = d.decodeBit(&lc.choice[0], rng, code)
 	if b == 0 {
-		l, err = lc.low[posState].Decode(d)
-		return
+		return lc.low[posState].decode(d, rng, code)
 	}
-	if b, err = lc.choice[1].Decode(d); err != nil {
-		return
-	}
+	b, rng, code = d.decodeBit(&lc.choice[1], rng, code)
 	if b == 0 {
-		l, err = lc.mid[posState].Decode(d)
-		l += 8
-		return
+		l, rng, code = lc.mid[posState].decode(d, rng, code)
+		return l + 8, rng, code
 	}
-	l, err = lc.high.Decode(d)
-	l += 16
-	return
+	l, rng, code = lc.high.decode(d, rng, code)
+	return l + 16, rng, code
 }
