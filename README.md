@@ -1,8 +1,33 @@
 This here is a friendly fork of https://github.com/ulikunitz/xz with
-performance improvements (time and memory).
+several performance improvements, mostly focused on decoding, roughly
+doubling decoding speed for serial encoding, and about 20x with
+parallel block decoding for multiblock archives.
 
-Upstream seems inactive. However, if you have time and interest in doing that, feel free to carry
-these changes over.
+Upstream seems inactive. However, if you have time and interest in doing that,
+feel free to carry these changes over there.
+
+## Upstream as of 2026-07-16
+
+| Benchmark          | Throughput   | Time/op   | Bytes/op  | Allocs/op   |
+| ------------------ | ------------ | --------- | --------- | ----------- |
+| Reader (decompress) | 48.63 MiB/s | 196.1 ms  | 31.94 MiB | 1,213,036   |
+| Writer (compress)   | 14.09 MiB/s | 678.3 ms  | 69.35 MiB | 1,217,288   |
+
+## This fork
+
+| Benchmark           | Throughput             | Time/op            | Bytes/op            | Allocs/op                |
+| ------------------- | ---------------------- | ------------------ | ------------------- | ------------------------ |
+| Reader (decompress) | 106.32 MiB/s (+118.6%) | 89.7 ms (-54.3%)   | 13.56 MiB (-57.6%)  | 284 (-99.98%)            |
+| Writer (compress)   | 18.27 MiB/s (+29.7%)   | 522.1 ms (-23.0%)  | 50.85 MiB (-26.7%)  | 4,622 (-99.6%)           |
+
+## LLVM xz release tarball decoding (1.6G, multiblock)
+
+| Decoder                    | Time     | Throughput   |
+| -------------------------- | -------- | ------------ |
+| Reader (serial, Patch 9)   | 79.7 s   | 141 MiB/s    |
+| ParallelReader (18 workers)| 7.4 s    | 1,514 MiB/s  |
+
+------------------------
 
 # Package xz
 
