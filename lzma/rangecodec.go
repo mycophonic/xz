@@ -162,29 +162,6 @@ func (d *rangeDecoder) possiblyAtEnd() bool {
 	return d.code == 0
 }
 
-// DirectDecodeBit decodes a bit with probability 1/2. The return value b will
-// contain the bit at the least-significant position. All other bits will be
-// zero.
-func (d *rangeDecoder) DirectDecodeBit() (b uint32, err error) {
-	d.nrange >>= 1
-	d.code -= d.nrange
-	t := 0 - (d.code >> 31)
-	d.code += d.nrange & t
-	b = (t + 1) & 1
-
-	// d.code will stay less then d.nrange
-
-	// normalize
-	// assume d.code < d.nrange
-	const top = 1 << 24
-	if d.nrange >= top {
-		return b, nil
-	}
-	d.nrange <<= 8
-	// d.code < d.nrange will be maintained
-	return b, d.updateCode()
-}
-
 // decodeBit decodes a single bit. The bit will be returned at the
 // least-significant position. All other bits will be zero. The probability
 // value will be updated.
