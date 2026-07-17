@@ -93,7 +93,17 @@ func (d *decoder) readOp() (op operation, err error) {
 	rd := d.rd
 	rng, code := rd.nrange, rd.code
 	var b uint32
-	b, rng, code = rd.decodeBit(&d.State.isMatch[state2], rng, code)
+	b, rng, code = decodeBitArith(&d.State.isMatch[state2], rng, code)
+	if rng < rcTop {
+		rng <<= 8
+		code <<= 8
+		if pos := rd.pos; pos < len(rd.buf) {
+			code |= uint32(rd.buf[pos])
+			rd.pos = pos + 1
+		} else {
+			code |= uint32(rd.readByteSlow())
+		}
+	}
 	if b == 0 {
 		// literal
 		op, rng, code = d.decodeLiteral(rng, code)
@@ -101,7 +111,17 @@ func (d *decoder) readOp() (op operation, err error) {
 		d.State.updateStateLiteral()
 		return op, nil
 	}
-	b, rng, code = rd.decodeBit(&d.State.isRep[state], rng, code)
+	b, rng, code = decodeBitArith(&d.State.isRep[state], rng, code)
+	if rng < rcTop {
+		rng <<= 8
+		code <<= 8
+		if pos := rd.pos; pos < len(rd.buf) {
+			code |= uint32(rd.buf[pos])
+			rd.pos = pos + 1
+		} else {
+			code |= uint32(rd.readByteSlow())
+		}
+	}
 	if b == 0 {
 		// simple match
 		d.State.rep[3], d.State.rep[2], d.State.rep[1] =
@@ -122,11 +142,31 @@ func (d *decoder) readOp() (op operation, err error) {
 		op = matchOp(int64(d.State.rep[0])+minDistance, int(n)+minMatchLen)
 		return op, nil
 	}
-	b, rng, code = rd.decodeBit(&d.State.isRepG0[state], rng, code)
+	b, rng, code = decodeBitArith(&d.State.isRepG0[state], rng, code)
+	if rng < rcTop {
+		rng <<= 8
+		code <<= 8
+		if pos := rd.pos; pos < len(rd.buf) {
+			code |= uint32(rd.buf[pos])
+			rd.pos = pos + 1
+		} else {
+			code |= uint32(rd.readByteSlow())
+		}
+	}
 	dist := d.State.rep[0]
 	if b == 0 {
 		// rep match 0
-		b, rng, code = rd.decodeBit(&d.State.isRepG0Long[state2], rng, code)
+		b, rng, code = decodeBitArith(&d.State.isRepG0Long[state2], rng, code)
+		if rng < rcTop {
+			rng <<= 8
+			code <<= 8
+			if pos := rd.pos; pos < len(rd.buf) {
+				code |= uint32(rd.buf[pos])
+				rd.pos = pos + 1
+			} else {
+				code |= uint32(rd.readByteSlow())
+			}
+		}
 		if b == 0 {
 			rd.nrange, rd.code = rng, code
 			d.State.updateStateShortRep()
@@ -134,11 +174,31 @@ func (d *decoder) readOp() (op operation, err error) {
 			return op, nil
 		}
 	} else {
-		b, rng, code = rd.decodeBit(&d.State.isRepG1[state], rng, code)
+		b, rng, code = decodeBitArith(&d.State.isRepG1[state], rng, code)
+		if rng < rcTop {
+			rng <<= 8
+			code <<= 8
+			if pos := rd.pos; pos < len(rd.buf) {
+				code |= uint32(rd.buf[pos])
+				rd.pos = pos + 1
+			} else {
+				code |= uint32(rd.readByteSlow())
+			}
+		}
 		if b == 0 {
 			dist = d.State.rep[1]
 		} else {
-			b, rng, code = rd.decodeBit(&d.State.isRepG2[state], rng, code)
+			b, rng, code = decodeBitArith(&d.State.isRepG2[state], rng, code)
+			if rng < rcTop {
+				rng <<= 8
+				code <<= 8
+				if pos := rd.pos; pos < len(rd.buf) {
+					code |= uint32(rd.buf[pos])
+					rd.pos = pos + 1
+				} else {
+					code |= uint32(rd.readByteSlow())
+				}
+			}
 			if b == 0 {
 				dist = d.State.rep[2]
 			} else {

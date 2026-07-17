@@ -88,17 +88,48 @@ func (d *decoderDict) writeMatch(dist int64, length int) error {
 	}
 	d.head += int64(length)
 
-	i := d.buf.front - int(dist)
-	if i < 0 {
-		i += len(d.buf.data)
+	data := d.buf.data
+	front := d.buf.front
+	i := front - int(dist)
+	// Fast path: neither the source run nor the destination run crosses
+	// the physical end of the circular buffer, so the copy happens
+	// directly on the underlying array without going through buf.Write
+	// (which would recheck space and redo the wrap logic per segment).
+	if i >= 0 && front+length <= len(data) {
+		if length <= int(dist) {
+			// no overlap
+			copy(data[front:front+length], data[i:i+length])
+		} else {
+			// The match overlaps the write head: the stream repeats
+			// the last dist bytes. Copy the dist-sized pattern once,
+			// then double it from the freshly written destination
+			// (source and destination of each copy never overlap).
+			end := front + length
+			k := copy(data[front:end], data[i:front])
+			for k < length {
+				k += copy(data[front+k:end], data[front:front+k])
+			}
+		}
+		front += length
+		if front == len(data) {
+			front = 0
+		}
+		d.buf.front = front
+		return nil
 	}
+	// Slow path: the source or destination wraps around the end of the
+	// circular buffer. Rare (at most once per trip through the
+	// dictionary).
 	for length > 0 {
 		var p []byte
+		if i < 0 {
+			i += len(data)
+		}
 		if i >= d.buf.front {
-			p = d.buf.data[i:]
+			p = data[i:]
 			i = 0
 		} else {
-			p = d.buf.data[i:d.buf.front]
+			p = data[i:d.buf.front]
 			i = d.buf.front
 		}
 		if len(p) > length {
