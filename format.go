@@ -661,7 +661,9 @@ func writeIndex(w io.Writer, index []record) (n int64, err error) {
 }
 
 // readIndexBody reads the index from the reader. It assumes that the
-// index indicator has already been read.
+// index indicator has already been read. A negative expectedRecordLen
+// disables the record-count check (used when the index is parsed before
+// the blocks, as the parallel reader does).
 func readIndexBody(r io.Reader, expectedRecordLen int) (records []record, n int64, err error) {
 	crc := crc32.NewIEEE()
 	// index indicator
@@ -679,7 +681,7 @@ func readIndexBody(r io.Reader, expectedRecordLen int) (records []record, n int6
 	if recLen < 0 || uint64(recLen) != u {
 		return nil, n, errors.New("xz: record number overflow")
 	}
-	if recLen != expectedRecordLen {
+	if expectedRecordLen >= 0 && recLen != expectedRecordLen {
 		return nil, n, fmt.Errorf(
 			"xz: index length is %d; want %d",
 			recLen, expectedRecordLen)
