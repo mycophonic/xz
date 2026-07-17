@@ -189,25 +189,35 @@ func (d *rangeDecoder) DirectDecodeBit() (b uint32, err error) {
 // least-significant position. All other bits will be zero. The probability
 // value will be updated.
 func (d *rangeDecoder) DecodeBit(p *prob) (b uint32, err error) {
-	bound := p.bound(d.nrange)
-	if d.code < bound {
-		d.nrange = bound
-		p.inc()
-		b = 0
-	} else {
-		d.code -= bound
-		d.nrange -= bound
-		p.dec()
-		b = 1
+	bound := (d.nrange >> probbits) * uint32(*p)
+	// The decoded bit is code >= bound. That comparison is data-dependent
+	// and essentially unpredictable (it is decoding near-random compressed
+	// bits), so branching on it mispredicts ~half the time and dominated the
+	// decode. Instead derive a full-width mask from it and select the range,
+	// code and probability updates with arithmetic. The bare comparison-to-a
+	// -flag compiles to a conditional set (no branch); only the predictable
+	// normalization below remains a branch.
+	var ge uint32
+	if d.code >= bound {
+		ge = 1
 	}
-	// normalize
-	// assume d.code < d.nrange
+	mask := uint32(0) - ge // 0xffffffff when the bit is 1, else 0
+	// bit 1: code -= bound, nrange -= bound, p -= p>>movebits
+	// bit 0: code stays,    nrange  = bound, p += (max-p)>>movebits
+	d.code -= bound & mask
+	d.nrange = (d.nrange-bound)&mask | bound&^mask
+	pv := uint32(*p)
+	inc := ((1 << probbits) - pv) >> movebits
+	dec := pv >> movebits
+	*p = prob(pv + (inc &^ mask) - (dec & mask))
+	b = ge
+
+	// normalize (predictable: taken roughly once per eight bits)
 	const top = 1 << 24
 	if d.nrange >= top {
 		return b, nil
 	}
 	d.nrange <<= 8
-	// d.code < d.nrange will be maintained
 	return b, d.updateCode()
 }
 
